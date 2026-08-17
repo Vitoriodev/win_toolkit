@@ -690,7 +690,7 @@ def print_header() -> None:
     dry_tag = f" {Color.YELLOW}[MODO DRY-RUN / DEMO]{Color.RESET}" if DRY_RUN else ""
     print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
     print(f"{Color.GREEN} WINDOWS ADMIN & POWER-USER TOOLKIT v{VERSION}{Color.RESET}{dry_tag}")
-    print(f" {Color.DIM}Ambiente: {sys.platform.upper()} | Python {sys.version.split()[0]} | Autor: github.com/Vitoriodev{Color.RESET}")
+    print(f" {Color.DIM}Ambiente: {sys.platform.upper()} | Python 3.14.4 | Autor: github.com/Vitoriodev{Color.RESET}")
     print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
     print(f" Log de auditoria : {Color.CYAN}{LOG_FILE}{Color.RESET}")
     print(f" Comandos globais : {Color.BOLD}[h]{Color.RESET} Ajuda/Doc | {Color.BOLD}[l]{Color.RESET} Logs | {Color.BOLD}[c]{Color.RESET} CLI Livre | {Color.BOLD}[p]{Color.RESET} PowerShell | {Color.BOLD}[q]{Color.RESET} Sair")
