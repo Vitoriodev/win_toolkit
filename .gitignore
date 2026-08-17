@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+!dist/win_toolkit.exe
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec.bak
+warn-*.txt
+xref-*.html
+
+# Logs & Relatórios locais
+win_toolkit_log.txt
+*.log
+relatorio_*.txt
+relatorio_*.md
+
+# IDEs
+.vscode/
+.idea/
