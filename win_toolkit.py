@@ -1,80 +1,25 @@
 #!/usr/bin/env python3
 """
-Windows Admin & Power-User Toolkit v2.5
-=======================================
-Interface interativa de terminal (CLI/TUI) para rotinas administrativas de baixo nível,
-diagnóstico de hardware, segurança, manutenção avançada, análise forense e virtualização.
-
-Requisitos: Windows 10/11 x64
-Uso:        python win_toolkit.py [--dry-run]
+Windows Admin & Power-User Toolkit v7.1 (Resilient GUI Edition)
 """
 
 from __future__ import annotations
 
-import argparse
 import ctypes
 import datetime
 import os
-import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
-from enum import Enum
+import threading
+import traceback
 from typing import Callable, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
-# Configurações Globais e Flags
-# ---------------------------------------------------------------------------
-
-VERSION = "2.5.0"
-DRY_RUN = False
-LOG_FILE = os.path.join(os.path.expanduser("~"), "win_toolkit_log.txt")
-
-
-# ---------------------------------------------------------------------------
-# Suporte a Cores ANSI / TUI
-# ---------------------------------------------------------------------------
-
-class Color:
-    """Controle de cores e estilos ANSI com suporte a Windows Terminal VT100."""
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    ITALIC = "\033[3m"
-    UNDERLINE = "\033[4m"
-
-    # Cores de Primeiro Plano
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
-    WHITE = "\033[97m"
-
-    @classmethod
-    def enable_vt_support(cls) -> None:
-        """Habilita Virtual Terminal Processing no console nativo do Windows 10/11."""
-        if os.name == "nt":
-            try:
-                kernel32 = ctypes.windll.kernel32
-                h_stdout = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-                mode = ctypes.c_ulong()
-                kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode))
-                # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-                mode.value |= 0x0004
-                kernel32.SetConsoleMode(h_stdout, mode)
-            except Exception:
-                pass
-
-
-# ---------------------------------------------------------------------------
-# Elevação de Privilégios (UAC)
+# Elevação de Privilégios Segura (UAC)
 # ---------------------------------------------------------------------------
 
 def is_admin() -> bool:
-    """Verifica se o processo atual possui privilégios de Administrador."""
-    if DRY_RUN or os.name != "nt":
+    if os.name != "nt":
         return True
     try:
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -82,764 +27,563 @@ def is_admin() -> bool:
         return False
 
 
-def relaunch_as_admin() -> None:
-    """Reabre o próprio script em um processo elevado solicitando o prompt UAC."""
-    params = " ".join(f'"{a}"' for a in sys.argv)
-    ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", sys.executable, f'"{sys.argv[0]}" {params}', None, 1
-    )
-    sys.exit(0)
-
-
-def ensure_admin() -> None:
-    """Garante execução em ambiente administrativo ou encerra com aviso."""
-    if DRY_RUN:
-        return
+def relaunch_as_admin() -> bool:
+    """Solicita elevação de privilégios e encerra o processo não elevado se autorizado."""
     if os.name != "nt":
-        print(f"{Color.RED}[!] Este programa foi desenvolvido para Windows 10/11.{Color.RESET}")
-        print(f"{Color.YELLOW}[*] Use a flag --dry-run para testar em outros sistemas operacionais.{Color.RESET}")
-        sys.exit(1)
-    if not is_admin():
-        print(f"{Color.YELLOW}[!] Privilégios de Administrador necessários. Solicitando elevação (UAC)...{Color.RESET}")
-        relaunch_as_admin()
-
-
-# ---------------------------------------------------------------------------
-# Execução de Comandos, Validação e Logging
-# ---------------------------------------------------------------------------
-
-def append_to_log(text: str) -> None:
-    """Registra eventos de auditoria com timestamp."""
+        return True
     try:
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            log.write(f"[{timestamp}] {text}\n")
-    except Exception:
-        pass
-
-
-def run_powershell(command: str, live: bool = True, timeout: Optional[int] = None) -> tuple[int, str]:
-    """
-    Executa um comando no PowerShell com bypass de ExecutionPolicy.
-    Retorna uma tupla (returncode, output_text).
-    """
-    append_to_log(f"$ {command}")
-
-    if DRY_RUN:
-        print(f"{Color.CYAN}[DRY-RUN Simulação]{Color.RESET} {Color.BOLD}{command}{Color.RESET}")
-        return (0, "[DRY-RUN: Comando simulado com sucesso]")
-
-    full_cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-Command", command,
-    ]
-
-    try:
-        if live:
-            proc = subprocess.run(full_cmd, timeout=timeout)
-            return proc.returncode, ""
+        params = " ".join(f'"{a}"' for a in sys.argv[1:])
+        # 1 = SW_SHOWNORMAL
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", sys.executable, f'"{sys.argv[0]}" {params}', None, 1
+        )
+        # Códigos acima de 32 indicam sucesso
+        if ret > 32:
+            sys.exit(0)
         else:
-            proc = subprocess.run(
-                full_cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace"
-            )
-            output = proc.stdout + (proc.stderr or "")
-            if proc.stdout:
-                print(proc.stdout)
-            if proc.stderr:
-                print(f"{Color.RED}{proc.stderr}{Color.RESET}")
-            append_to_log(f"OUTPUT:\n{output}")
-            return proc.returncode, output
-    except subprocess.TimeoutExpired:
-        msg = f"{Color.RED}[ERRO] O comando excedeu o tempo limite de execução ({timeout}s).{Color.RESET}"
-        print(msg)
-        append_to_log(f"TIMEOUT: {timeout}s")
-        return (124, "Timeout")
-    except KeyboardInterrupt:
-        print(f"\n{Color.YELLOW}[!] Execução interrompida pelo usuário.{Color.RESET}")
-        append_to_log("INTERRUPTED BY USER")
-        return (130, "KeyboardInterrupt")
-    except Exception as e:
-        msg = f"{Color.RED}[ERRO DE EXECUÇÃO] {e}{Color.RESET}"
-        print(msg)
-        append_to_log(f"ERROR: {e}")
-        return (1, str(e))
-
-
-def confirm(message: str) -> bool:
-    """Exibe confirmação segura do usuário."""
-    try:
-        resp = input(f"{Color.YELLOW}{message} (s/N): {Color.RESET}").strip().lower()
-        return resp in ("s", "sim", "y", "yes")
-    except KeyboardInterrupt:
-        print()
+            return False
+    except Exception:
         return False
 
 
-def sanitize_input(val: str, pattern: str, error_msg: str = "Entrada inválida.") -> Optional[str]:
-    """Valida e sanitiza strings contra injeção de parâmetros maliciosos."""
-    cleaned = val.strip()
-    if not cleaned:
-        return None
-    if re.match(pattern, cleaned):
-        return cleaned
-    print(f"{Color.RED}[!] {error_msg}{Color.RESET}")
-    return None
-
-
-def escape_ps_string(val: str) -> str:
-    """Escapa aspas simples para interpolação segura no PowerShell."""
-    return val.replace("'", "''")
-
-
 # ---------------------------------------------------------------------------
-# Estrutura de Dados e Dataclasses
+# Importação Segura do Tkinter
 # ---------------------------------------------------------------------------
 
-class ActionKind(Enum):
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, simpledialog, ttk
+except Exception as e:
+    if os.name == "nt":
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Erro crítico ao carregar interface gráfica (Tkinter):\n\n{e}",
+            "Toolkit - Falha de Inicialização",
+            0x10  # MB_ICONERROR
+        )
+    sys.exit(1)
+
+VERSION = "7.1.0"
+LOG_FILE = os.path.join(os.path.expanduser("~"), "win_toolkit_gui_log.txt")
+
+
+class ActionType:
     NORMAL = "normal"
     DANGEROUS = "dangerous"
-    INTERACTIVE = "interactive"
-    KIT = "kit"
+    CUSTOM = "custom"
 
 
-@dataclass
 class CommandItem:
-    title: str
-    command: Optional[str]
-    kind: ActionKind
-    description: str
-    action_key: Optional[str] = None
+    def __init__(self, title: str, command: Optional[str], action_type: str, description: str, handler: Optional[Callable] = None):
+        self.title = title
+        self.command = command
+        self.action_type = action_type
+        self.description = description
+        self.handler = handler
 
 
-@dataclass
-class Category:
-    name: str
-    items: List[CommandItem] = field(default_factory=list)
+class ToolkitGUI(tk.Tk):
+    def __init__(self):
+        super().__init__()
 
+        admin_status = "[ADMIN]" if is_admin() else "[USUÁRIO COMUM]"
+        self.title(f"Windows Admin & Power-User Toolkit v{VERSION} {admin_status}")
+        self.geometry("1200x780")
+        self.minsize(1000, 660)
+        self.configure(bg="#0f172a")
 
-# ---------------------------------------------------------------------------
-# Ações Especiais e Interativas
-# ---------------------------------------------------------------------------
+        self.categories: Dict[str, List[CommandItem]] = {}
+        self.init_catalog()
+        self.setup_ui()
 
-def action_kill_pid() -> None:
-    pid = input(f"{Color.CYAN}PID do processo a finalizar: {Color.RESET}").strip()
-    clean_pid = sanitize_input(pid, r"^\d+$", "O PID deve conter apenas números.")
-    if clean_pid:
-        if confirm(f"Tem certeza que deseja forçar o encerramento do PID {clean_pid}?"):
-            run_powershell(f"Stop-Process -Id {clean_pid} -Force")
+    def setup_ui(self):
+        header_frame = tk.Frame(self, bg="#1e293b", height=60)
+        header_frame.pack(side=tk.TOP, fill=tk.X)
 
+        title_lbl = tk.Label(
+            header_frame,
+            text=f"⚙ WINDOWS ADMIN TOOLKIT v{VERSION}",
+            font=("Segoe UI", 13, "bold"),
+            bg="#1e293b",
+            fg="#38bdf8",
+            padx=20,
+            pady=15
+        )
+        title_lbl.pack(side=tk.LEFT)
 
-def action_kill_name() -> None:
-    name = input(f"{Color.CYAN}Nome do processo (ex: chrome, notepad): {Color.RESET}").strip()
-    clean_name = sanitize_input(name, r"^[a-zA-Z0-9_\-\.]+$", "Nome de processo inválido.")
-    if clean_name:
-        if confirm(f"Tem certeza que deseja encerrar todos os processos com nome '{clean_name}'?"):
-            escaped = escape_ps_string(clean_name)
-            run_powershell(f"Stop-Process -Name '{escaped}' -Force")
+        adm = is_admin()
+        status_color = "#4ade80" if adm else "#f87171"
+        status_text = "● PRIVILÉGIOS ELEVADOS (ADMIN)" if adm else "● MODO NÃO-ELEVADO (ACESSO LIMITADO)"
 
+        status_lbl = tk.Label(
+            header_frame,
+            text=status_text,
+            font=("Segoe UI", 9, "bold"),
+            bg="#1e293b",
+            fg=status_color,
+            padx=20
+        )
+        status_lbl.pack(side=tk.RIGHT)
 
-def action_list_dlls() -> None:
-    pid = input(f"{Color.CYAN}PID do processo para inspecionar módulos/DLLs: {Color.RESET}").strip()
-    clean_pid = sanitize_input(pid, r"^\d+$", "O PID deve conter apenas números.")
-    if clean_pid:
-        cmd = f"(Get-Process -Id {clean_pid}).Modules | Select-Object ModuleName,FileName,Size | Format-Table -AutoSize"
-        run_powershell(cmd)
+        main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
+        main_paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # 1. Painel Lateral
+        left_frame = tk.Frame(main_paned, bg="#1e293b", width=260)
+        main_paned.add(left_frame, weight=1)
 
-def action_test_port() -> None:
-    host = input(f"{Color.CYAN}Host ou IP de destino (ex: 8.8.8.8, github.com): {Color.RESET}").strip()
-    clean_host = sanitize_input(host, r"^[a-zA-Z0-9\.\-_]+$", "Host/IP inválido.")
-    if not clean_host:
-        return
+        cat_title = tk.Label(left_frame, text="MÓDULOS DEDICADOS", font=("Segoe UI", 10, "bold"), bg="#1e293b", fg="#94a3b8", pady=10)
+        cat_title.pack(fill=tk.X)
 
-    port = input(f"{Color.CYAN}Porta TCP (ex: 443, 22, 80): {Color.RESET}").strip()
-    clean_port = sanitize_input(port, r"^\d+$", "Porta deve ser numérica.")
-    if clean_port and 1 <= int(clean_port) <= 65535:
-        escaped_host = escape_ps_string(clean_host)
-        run_powershell(f"Test-NetConnection -ComputerName '{escaped_host}' -Port {clean_port} -InformationLevel Detailed")
-    else:
-        print(f"{Color.RED}[!] A porta deve estar no intervalo de 1 a 65535.{Color.RESET}")
+        self.cat_listbox = tk.Listbox(
+            left_frame,
+            bg="#0f172a",
+            fg="#f8fafc",
+            selectbackground="#38bdf8",
+            selectforeground="#0f172a",
+            font=("Segoe UI", 9),
+            borderwidth=0,
+            highlightthickness=0,
+            activestyle="none"
+        )
+        self.cat_listbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.cat_listbox.bind("<<ListboxSelect>>", self.on_category_select)
 
+        for cat_name in self.categories.keys():
+            self.cat_listbox.insert(tk.END, f"  {cat_name}")
 
-def action_calc_hash() -> None:
-    path = input(f"{Color.CYAN}Caminho completo do arquivo: {Color.RESET}").strip().strip('"').strip("'")
-    if not path:
-        return
-    if os.path.isfile(path) or DRY_RUN:
-        escaped_path = escape_ps_string(path)
-        run_powershell(f"Get-FileHash -Path '{escaped_path}' -Algorithm SHA256 | Format-List")
-    else:
-        print(f"{Color.RED}[!] Arquivo não encontrado no caminho especificado.{Color.RESET}")
+        # 2. Painel Central
+        center_frame = tk.Frame(main_paned, bg="#0f172a", width=370)
+        main_paned.add(center_frame, weight=2)
 
+        self.cmd_title = tk.Label(center_frame, text="AÇÕES DO MÓDULO", font=("Segoe UI", 10, "bold"), bg="#0f172a", fg="#94a3b8", pady=10)
+        self.cmd_title.pack(fill=tk.X)
 
-def action_manage_service() -> None:
-    srv = input(f"{Color.CYAN}Nome do Serviço (Service Name): {Color.RESET}").strip()
-    clean_srv = sanitize_input(srv, r"^[a-zA-Z0-9_\-\. \$]+$", "Nome de serviço inválido.")
-    if not clean_srv:
-        return
+        self.buttons_canvas = tk.Canvas(center_frame, bg="#0f172a", highlightthickness=0)
+        self.buttons_scrollbar = ttk.Scrollbar(center_frame, orient=tk.VERTICAL, command=self.buttons_canvas.yview)
+        self.buttons_frame = tk.Frame(self.buttons_canvas, bg="#0f172a")
 
-    print(f"\n{Color.BOLD}Operações para o serviço '{clean_srv}':{Color.RESET}")
-    print(" 1) Iniciar serviço")
-    print(" 2) Parar serviço")
-    print(" 3) Reiniciar serviço")
-    print(" 4) Consultar Status Completo")
-    print(" 0) Cancelar")
-    op = input(f"{Color.CYAN}Opção: {Color.RESET}").strip()
+        self.buttons_frame.bind(
+            "<Configure>",
+            lambda e: self.buttons_canvas.configure(scrollregion=self.buttons_canvas.bbox("all"))
+        )
 
-    escaped = escape_ps_string(clean_srv)
-    if op == "1":
-        run_powershell(f"Start-Service -Name '{escaped}'")
-    elif op == "2":
-        if confirm(f"Deseja parar o serviço '{clean_srv}'?"):
-            run_powershell(f"Stop-Service -Name '{escaped}' -Force")
-    elif op == "3":
-        run_powershell(f"Restart-Service -Name '{escaped}' -Force")
-    elif op == "4":
-        run_powershell(f"Get-Service -Name '{escaped}' | Select-Object * | Format-List")
+        self.canvas_window = self.buttons_canvas.create_window((0, 0), window=self.buttons_frame, anchor="nw")
+        self.buttons_canvas.bind("<Configure>", lambda e: self.buttons_canvas.itemconfig(self.canvas_window, width=e.width))
+        self.buttons_canvas.configure(yscrollcommand=self.buttons_scrollbar.set)
 
+        self.buttons_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
+        self.buttons_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-def action_create_restore_point() -> None:
-    """Cria um Ponto de Restauração do Sistema com confirmação."""
-    print(f"{Color.YELLOW}[*] Criando Ponto de Restauração do Sistema...{Color.RESET}")
-    cmd = 'Checkpoint-Computer -Description "WinToolkit Backup Manual" -RestorePointType "MODIFY_SETTINGS"'
-    run_powershell(cmd)
+        # 3. Painel Direito (Console)
+        right_frame = tk.Frame(main_paned, bg="#1e293b", width=570)
+        main_paned.add(right_frame, weight=3)
 
+        console_header = tk.Frame(right_frame, bg="#1e293b")
+        console_header.pack(fill=tk.X, padx=10, pady=6)
 
-def action_system_cleanup() -> None:
-    """Rotina integrada de limpeza de arquivos temporários, caches e lixeira."""
-    print(f"\n{Color.BOLD}{Color.YELLOW}=== ROTINA DE LIMPEZA E OTIMIZAÇÃO DO SISTEMA ==={Color.RESET}\n")
-    print("Esta rotina limpará:")
-    print(" • Arquivos temporários do usuário (%TEMP%) e do sistema (C:\\Windows\\Temp)")
-    print(" • Arquivos da Lixeira do Windows")
-    print(" • Cache de arquivos Prefetch")
-    print(" • Cache de downloads do Windows Update (SoftwareDistribution\\Download)")
-    print()
+        tk.Label(console_header, text="CONSOLE POWERSHELL (TEMPO REAL)", font=("Segoe UI", 10, "bold"), bg="#1e293b", fg="#94a3b8").pack(side=tk.LEFT)
 
-    if not confirm("Deseja executar a limpeza profunda agora?"):
-        print("Operação cancelada.")
-        return
+        clear_btn = tk.Button(console_header, text="Limpar Console", bg="#334155", fg="#f8fafc", font=("Segoe UI", 8), command=self.clear_console, relief=tk.FLAT)
+        clear_btn.pack(side=tk.RIGHT)
 
-    commands = [
-        ("Limpando Lixeira do Windows...", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"),
-        ("Limpando arquivos temporários do usuário (%TEMP%)...", "Remove-Item -Path \"$env:TEMP\\*\" -Recurse -Force -ErrorAction SilentlyContinue"),
-        ("Limpando pasta temporária do Windows...", "Remove-Item -Path \"$env:SystemRoot\\Temp\\*\" -Recurse -Force -ErrorAction SilentlyContinue"),
-        ("Limpando pasta Prefetch...", "Remove-Item -Path \"$env:SystemRoot\\Prefetch\\*\" -Recurse -Force -ErrorAction SilentlyContinue"),
-        ("Limpando cache do Windows Update...", "net stop wuauserv; Remove-Item -Path \"$env:SystemRoot\\SoftwareDistribution\\Download\\*\" -Recurse -Force -ErrorAction SilentlyContinue; net start wuauserv"),
-    ]
+        self.console_txt = tk.Text(
+            right_frame,
+            bg="#020617",
+            fg="#e2e8f0",
+            font=("Consolas", 10),
+            wrap=tk.WORD,
+            borderwidth=0,
+            highlightthickness=0,
+            padx=10,
+            pady=10
+        )
+        self.console_txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-    for desc, cmd in commands:
-        print(f"\n{Color.CYAN}>> {desc}{Color.RESET}")
-        run_powershell(cmd)
+        if self.categories:
+            self.cat_listbox.select_set(0)
+            self.load_category_buttons(list(self.categories.keys())[0])
 
-    print(f"\n{Color.GREEN}[✓] Limpeza do sistema concluída com sucesso!{Color.RESET}")
+    def on_category_select(self, event):
+        selection = self.cat_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            cat_name = list(self.categories.keys())[idx]
+            self.load_category_buttons(cat_name)
 
+    def load_category_buttons(self, cat_name: str):
+        self.cmd_title.config(text=f"MÓDULO: {cat_name.upper()}")
+        for widget in self.buttons_frame.winfo_children():
+            widget.destroy()
 
-def action_view_logs() -> None:
-    """Visualizador de log de auditoria integrado."""
-    while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-        print(f"{Color.GREEN} AUDITORIA & VISUALIZADOR DE LOGS: {LOG_FILE}{Color.RESET}")
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
+        items = self.categories.get(cat_name, [])
+        for item in items:
+            btn_color = "#1e293b"
+            fg_color = "#f8fafc"
 
-        if not os.path.exists(LOG_FILE):
-            print(f"{Color.YELLOW}Nenhum registro de log encontrado ainda.{Color.RESET}")
-        else:
+            if item.action_type == ActionType.DANGEROUS:
+                btn_color = "#7f1d1d"
+            elif item.action_type == ActionType.CUSTOM:
+                btn_color = "#1e3a8a"
+
+            card = tk.Frame(self.buttons_frame, bg=btn_color, pady=8, padx=10, cursor="hand2")
+            card.pack(fill=tk.X, pady=4, padx=5)
+
+            title_lbl = tk.Label(card, text=item.title, font=("Segoe UI", 9, "bold"), bg=btn_color, fg=fg_color, anchor="w")
+            title_lbl.pack(fill=tk.X)
+
+            desc_lbl = tk.Label(card, text=item.description, font=("Segoe UI", 8), bg=btn_color, fg="#94a3b8", anchor="w", wraplength=310, justify=tk.LEFT)
+            desc_lbl.pack(fill=tk.X, pady=(2, 0))
+
+            for w in (card, title_lbl, desc_lbl):
+                w.bind("<Button-1>", lambda e, it=item: self.dispatch_command(it))
+
+    def write_console(self, text: str):
+        self.console_txt.insert(tk.END, text)
+        self.console_txt.see(tk.END)
+
+    def clear_console(self):
+        self.console_txt.delete("1.0", tk.END)
+
+    def run_powershell_async(self, command: str, title: str):
+        def worker():
+            self.write_console(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] > EXECUTANDO: {title}\n")
+            self.write_console(f"$ {command}\n\n")
+
+            full_cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
+
             try:
-                with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
-                total_lines = len(lines)
-                print(f"Total de linhas registradas: {Color.CYAN}{total_lines}{Color.RESET}\n")
-                last_lines = lines[-35:]
-                print("".join(last_lines))
+                # Flag para impedir criação de terminal piscando
+                creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
+                proc = subprocess.Popen(
+                    full_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    creationflags=creationflags
+                )
+
+                for line in proc.stdout:
+                    self.write_console(line)
+
+                stderr_out = proc.stderr.read()
+                if stderr_out:
+                    self.write_console(f"\n[ERRO]:\n{stderr_out}\n")
+
+                proc.wait()
+                self.write_console(f"\n[✓] Concluído (Código {proc.returncode})\n")
             except Exception as e:
-                print(f"{Color.RED}Erro ao ler arquivo de log: {e}{Color.RESET}")
+                self.write_console(f"\n[FALHA DE EXECUÇÃO]: {e}\n")
 
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-        print(" [L] Limpar todo o log  |  [0] Voltar ao Menu")
-        choice = input(f"\n{Color.CYAN}Opção: {Color.RESET}").strip().lower()
-        if choice in ("0", ""):
-            break
-        elif choice == "l":
-            if confirm("Tem certeza que deseja apagar todos os registros do log?"):
-                try:
-                    with open(LOG_FILE, "w", encoding="utf-8") as f:
-                        f.write("")
-                    print(f"{Color.GREEN}[✓] Log limpo.{Color.RESET}")
-                except Exception as e:
-                    print(f"{Color.RED}Erro ao limpar log: {e}{Color.RESET}")
-                input("Pressione Enter...")
+        threading.Thread(target=worker, daemon=True).start()
 
+    def dispatch_command(self, item: CommandItem):
+        if item.action_type == ActionType.DANGEROUS:
+            if not messagebox.askyesno("Confirmação de Segurança", f"ATENÇÃO: '{item.title}' causará alterações no sistema.\n\nDeseja continuar?"):
+                return
 
-def export_diagnostic_kit(name: str, desc: str, kit_commands: str) -> None:
-    """Executa um kit de diagnóstico e exporta o relatório consolidado."""
-    print(f"\n{Color.BOLD}{Color.CYAN}Executando Kit de Diagnóstico: {desc}{Color.RESET}\n")
-    timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_filename = f"Relatorio_{name}_{timestamp_str}.md"
-    desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
-    if not os.path.exists(desktop_path):
-        desktop_path = os.path.expanduser("~")
-    target_file = os.path.join(desktop_path, report_filename)
+        if item.handler:
+            item.handler()
+        elif item.command:
+            self.run_powershell_async(item.command, item.title)
 
-    report_content = [
-        f"# Relatório de Diagnóstico Técnico - {desc}",
-        f"**Data de Geração:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"**Host:** {os.environ.get('COMPUTERNAME', 'Localhost')}",
-        f"**Versão Toolkit:** {VERSION}",
-        "\n---\n"
-    ]
+    # -----------------------------------------------------------------------
+    # Handlers Customizados
+    # -----------------------------------------------------------------------
 
-    for line in kit_commands.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        print(f"{Color.CYAN}$ {line}{Color.RESET}")
-        code, out = run_powershell(line, live=False)
-        report_content.append(f"### `$ {line}`")
-        report_content.append("```text")
-        report_content.append(out.strip() if out else "[Sem saída]")
-        report_content.append("```\n")
+    def custom_ticket_summary(self):
+        cmd = """
+        $cs = Get-CimInstance Win32_ComputerSystem
+        $bios = Get-CimInstance Win32_BIOS
+        $os = Get-CimInstance Win32_OperatingSystem
+        $cpu = Get-CimInstance Win32_Processor
+        $disks = Get-PhysicalDisk | ForEach-Object { "$($_.FriendlyName) ($($_.MediaType), $($_.HealthStatus))" }
+        $failed = (Get-PnpDevice | Where-Object Status -ne 'OK').Count
 
-    try:
-        with open(target_file, "w", encoding="utf-8") as rf:
-            rf.write("\n".join(report_content))
-        print(f"\n{Color.GREEN}[✓] Relatório exportado com sucesso em:{Color.RESET} {Color.BOLD}{target_file}{Color.RESET}")
-    except Exception as e:
-        print(f"{Color.RED}[!] Falha ao salvar arquivo de relatório: {e}{Color.RESET}")
+        [PSCustomObject]@{
+            HostName      = $cs.Name
+            Equipamento   = "$($cs.Manufacturer) $($cs.Model)"
+            SerialBIOS    = $bios.SerialNumber
+            Sistema       = "$($os.Caption) ($($os.OSArchitecture))"
+            Processador   = $cpu.Name
+            RAM_Total_GB  = [math]::Round($cs.TotalPhysicalMemory / 1GB, 2)
+            Discos        = ($disks -join ' | ')
+            DevComFalha   = $failed
+        } | Format-List
+        """
+        self.run_powershell_async(cmd, "Resumo Técnico para Chamados")
 
+    def custom_chkdsk_dynamic(self):
+        drive = simpledialog.askstring("Verificar Disco", "Informe a letra da unidade (ex: C, D, E):")
+        if drive and len(drive.strip()) == 1:
+            clean = drive.strip().upper()
+            self.run_powershell_async(f"chkdsk {clean}: /scan", f"CHKDSK em {clean}:")
 
-SPECIAL_ACTIONS: Dict[str, Callable[[], None]] = {
-    "kill_pid": action_kill_pid,
-    "kill_name": action_kill_name,
-    "list_dlls": action_list_dlls,
-    "test_port": action_test_port,
-    "calc_hash": action_calc_hash,
-    "manage_service": action_manage_service,
-    "create_restore_point": action_create_restore_point,
-    "system_cleanup": action_system_cleanup,
-    "view_logs": action_view_logs,
-}
+    def custom_trim_dynamic(self):
+        drive = simpledialog.askstring("Otimização TRIM", "Informe a letra do SSD (ex: C, D):")
+        if drive and len(drive.strip()) == 1:
+            clean = drive.strip().upper()
+            self.run_powershell_async(f"Optimize-Volume -DriveLetter {clean} -Defrag -Verbose", f"TRIM no SSD {clean}:")
 
-
-# ---------------------------------------------------------------------------
-# Catálogo de Comandos e Categorias
-# ---------------------------------------------------------------------------
-
-KITS_RAW = {
-    "KIT_REDE_PRO": """
-Get-NetIPConfiguration
-ping -n 2 1.1.1.1
-Resolve-DnsName google.com
-Get-NetRoute -AddressFamily IPv4
-Get-NetTCPConnection | Where-Object State -eq 'Listen' | Select-Object LocalAddress,LocalPort,OwningProcess
-netstat -e
-""",
-    "KIT_SECURITY": """
-whoami /all
-manage-bde -status
-Get-Tpm
-Get-NetFirewallProfile | Select-Object Name,Enabled
-Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4624} -MaxEvents 5 -ErrorAction SilentlyContinue
-""",
-    "KIT_HARDWARE": """
-Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,HealthStatus
-Get-Volume
-Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors
-Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity,Speed
-Get-WinEvent -FilterHashtable @{LogName='System'; Level=1,2} -MaxEvents 10 -ErrorAction SilentlyContinue
-""",
-}
-
-CATEGORIES_DATA: List[Category] = [
-    Category("1. Informações do Sistema & Hardware", [
-        CommandItem("Versão do Windows (winver)", "winver", ActionKind.NORMAL,
-                    "Abre a interface gráfica com a compilação exata do kernel NT."),
-        CommandItem("Informações completas (systeminfo)", "systeminfo", ActionKind.NORMAL,
-                    "Exibe dados de BIOS, Hyper-V, placa-mãe, memória física e hotfixes."),
-        CommandItem("Info do Sistema Detalhada (PowerShell)", "Get-ComputerInfo", ActionKind.NORMAL,
-                    "Coleta objetos estruturados de hardware, SO e patches via CIM."),
-        CommandItem("Topologia de CPU (Cores/Threads/Cache)",
-                    "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,L2CacheSize,L3CacheSize | Format-List",
-                    ActionKind.NORMAL, "Lista arquitetura da CPU, núcleos físicos, threads e caches L2/L3."),
-        CommandItem("Slots de RAM, Barramento e Frequência",
-                    "Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,Capacity,Speed,ConfiguredClockSpeed,Manufacturer,PartNumber | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Exibe cada pente de memória, barramento (MHz) e Part Number."),
-        CommandItem("Placa-Mãe e Firmware",
-                    "Get-CimInstance Win32_BaseBoard | Select-Object Manufacturer,Product,SerialNumber,Version | Format-List",
-                    ActionKind.NORMAL, "Inspeciona modelo da motherboard e versão de fabricação."),
-        CommandItem("Parâmetros da BIOS/UEFI",
-                    "Get-CimInstance Win32_BIOS | Select-Object SMBIOSBIOSVersion,ReleaseDate,Manufacturer | Format-List",
-                    ActionKind.NORMAL, "Exibe versão do microcódigo/firmware UEFI instalado."),
-        CommandItem("GPU e Driver de Vídeo",
-                    "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion,AdapterRAM,VideoProcessor | Format-List",
-                    ActionKind.NORMAL, "Consulta modelo da placa de vídeo dedicada/integrada e versão do driver."),
-    ]),
-
-    Category("2. Processos, Threads e Análise Forense", [
-        CommandItem("Listar processos por consumo de CPU",
-                    "Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 Id,ProcessName,CPU,WorkingSet64 | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Exibe o Top 20 de processos com maior consumo de ciclos de processamento e RAM."),
-        CommandItem("Mapeamento Processo -> Serviços", "tasklist /svc", ActionKind.NORMAL,
-                    "Identifica quais serviços do Windows rodam dentro de cada processo svchost.exe."),
-        CommandItem("Processos com conexão TCP aberta",
-                    "Get-NetTCPConnection | Where-Object State -eq 'Established' | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,OwningProcess | Sort-Object OwningProcess | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Associa sockets TCP ativos diretamente ao PID do processo responsável."),
-        CommandItem("Investigar DLLs carregadas por um processo", None, ActionKind.INTERACTIVE,
-                    "Lista todos os módulos/DLLs mapeados no espaço de memória de um PID específico.",
-                    action_key="list_dlls"),
-        CommandItem("Finalizar processo por PID", None, ActionKind.INTERACTIVE,
-                    "Envia sinal de término imediato forçado para o PID indicado.",
-                    action_key="kill_pid"),
-        CommandItem("Finalizar processo por Nome", None, ActionKind.INTERACTIVE,
-                    "Mata todas as árvores de processos correspondentes ao executável.",
-                    action_key="kill_name"),
-    ]),
-
-    Category("3. Armazenamento, SMART e NVMe", [
-        CommandItem("Listar discos físicos e tipo de mídia (SSD/HDD/NVMe)",
-                    "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,BusType,HealthStatus,OperationalStatus | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Inspeciona a integridade SMART básica, tipo de barramento e estado operacional do disco."),
-        CommandItem("Volumes e Espaço Livre",
-                    "Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,SizeRemaining,Size | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Exibe tabela de partições montadas e espaço disponível em bytes."),
-        CommandItem("Análise de Partições (GPT/MBR)",
-                    "Get-Disk | Select-Object Number,FriendlyName,PartitionStyle,OperationalStatus,TotalSize | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Informa o esquema de particionamento (GPT/MBR) de cada disco físico."),
-        CommandItem("Verificar integridade C: (somente leitura)", "chkdsk C: /scan", ActionKind.NORMAL,
-                    "Executa varredura online do sistema de arquivos NTFS sem desmontar a unidade."),
-        CommandItem("Agendar reparo profundo de disco (CHKDSK /F /R)", "chkdsk C: /f /r", ActionKind.DANGEROUS,
-                    "Agenda para o próximo boot a correção de clusters e recuperação de setores defeituosos."),
-        CommandItem("Otimização/TRIM em SSDs", "Optimize-Volume -DriveLetter C -Defrag -Verbose", ActionKind.NORMAL,
-                    "Executa o comando TRIM para liberar blocos não utilizados no SSD."),
-        CommandItem("Abrir DiskPart (CLI)", "diskpart", ActionKind.DANGEROUS,
-                    "Abre a ferramenta nativa de baixo nível para particionamento e controle de volumes."),
-    ]),
-
-    Category("4. Reparo do Sistema e Component Store (WinSxS)", [
-        CommandItem("Verificar integridade de arquivos protegidos (SFC)", "sfc /scannow", ActionKind.NORMAL,
-                    "Analisa a assinatura e integridade de todos os binários essenciais do sistema operacional."),
-        CommandItem("Verificar status da imagem (DISM CheckHealth)", "DISM /Online /Cleanup-Image /CheckHealth", ActionKind.NORMAL,
-                    "Consulta flags de corrupção já identificadas pelo kernel."),
-        CommandItem("Varredura profunda do repositório WinSxS (ScanHealth)", "DISM /Online /Cleanup-Image /ScanHealth", ActionKind.NORMAL,
-                    "Executa hash check completo do repositório de componentes contra corrupções silenciosas."),
-        CommandItem("Reparação da imagem via Windows Update (RestoreHealth)", "DISM /Online /Cleanup-Image /RestoreHealth", ActionKind.NORMAL,
-                    "Restaura pacotes corrompidos baixando fontes oficiais da Microsoft."),
-        CommandItem("Limpeza do repositório WinSxS (ResetBase)", "DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase", ActionKind.DANGEROUS,
-                    "Remove versões antigas de atualizações substituídas, liberando espaço em disco."),
-    ]),
-
-    Category("5. Rede Avançada e Sockets", [
-        CommandItem("Configuração de interfaces e IPs", "Get-NetIPConfiguration -Detailed", ActionKind.NORMAL,
-                    "Lista endereços IPv4/IPv6, gateways, rotas e servidores DNS configurados."),
-        CommandItem("Tabela de Sockets Abertos e Portas em Escuta", "netstat -ano -p tcp", ActionKind.NORMAL,
-                    "Lista todas as conexões TCP ativas e portas em estado LISTENING com seus respectivos PIDs."),
-        CommandItem("Tabela de Roteamento IP (Kernel)", "route print", ActionKind.NORMAL,
-                    "Exibe as tabelas de rotas IPv4 e IPv6 gerenciadas pela pilha TCP/IP."),
-        CommandItem("Tabela ARP (Mapeamento IP -> MAC)", "arp -a", ActionKind.NORMAL,
-                    "Mostra a tabela de resolução de camada 2 (Data Link) da sub-rede local."),
-        CommandItem("Limpar Cache DNS do Host", "Clear-DnsClientCache", ActionKind.NORMAL,
-                    "Descarta registros resolvidos em cache pelo serviço DNS Client."),
-        CommandItem("Testar Latência e Portas (Test-NetConnection)", None, ActionKind.INTERACTIVE,
-                    "Executa handshake TCP completo contra host e porta arbitrários.",
-                    action_key="test_port"),
-        CommandItem("Estatísticas de Protocolos TCP/IP", "netstat -s", ActionKind.NORMAL,
-                    "Exibe métricas detalhadas de pacotes transmitidos, erros, retransmissões e conexões abortadas."),
-        CommandItem("Reset Completo da Pilha de Rede (Winsock + IP)", "netsh winsock reset; netsh int ip reset", ActionKind.DANGEROUS,
-                    "Restaura buffers de rede, catálogos LSP do Winsock e configurações de TCP/IP aos padrões de fábrica."),
-    ]),
-
-    Category("6. Segurança, Criptografia e Políticas", [
-        CommandItem("Calcular Hash SHA-256 de arquivo", None, ActionKind.INTERACTIVE,
-                    "Calcula o checksum criptográfico (SHA256) de um arquivo para verificar autenticidade.",
-                    action_key="calc_hash"),
-        CommandItem("Criar Ponto de Restauração do Sistema", None, ActionKind.INTERACTIVE,
-                    "Gera um ponto de restauração prévio no Windows para proteção contra falhas.",
-                    action_key="create_restore_point"),
-        CommandItem("Status do BitLocker e TPM", "manage-bde -status", ActionKind.NORMAL,
-                    "Consulta algoritmos de cifra, estado de bloqueio e método de proteção dos volumes."),
-        CommandItem("Status do Chip TPM (Segurança de Hardware)", "Get-Tpm", ActionKind.NORMAL,
-                    "Verifica se o TPM está ativado, pronto para uso e sua versão de especificação (2.0)."),
-        CommandItem("Status de Isolamento de Núcleo (VBS / Credential Guard)",
-                    "Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root/Microsoft/Windows/DeviceGuard | Select-Object SecurityServicesConfigured,SecurityServicesRunning | Format-List",
-                    ActionKind.NORMAL, "Analisa a segurança baseada em virtualização (VBS) e mitigação contra roubo de hashes."),
-        CommandItem("Auditoria de Certificados na Raiz do Sistema", "Get-ChildItem -Path Cert:\\LocalMachine\\Root | Format-Table -AutoSize", ActionKind.NORMAL,
-                    "Lista as Autoridades Certificadoras Raiz Confiáveis instaladas no armazenamento local."),
-        CommandItem("Políticas de Grupo Aplicadas (GPO Result)", "gpresult /r", ActionKind.NORMAL,
-                    "Extrai os escopos de gerenciamento e GPOs que incidem sobre o computador e usuário."),
-        CommandItem("Varredura Rápida do Windows Defender (CLI)", "Start-MpScan -ScanType QuickScan", ActionKind.NORMAL,
-                    "Dispara uma rotina de verificação rápida do antivírus via PowerShell."),
-        CommandItem("Atualizar Assinaturas do Windows Defender", "Update-MpSignature", ActionKind.NORMAL,
-                    "Força o download dos arquivos de definição de malwares mais recentes."),
-    ]),
-
-    Category("7. Manutenção, Inicialização e Serviços", [
-        CommandItem("Limpeza de Disco e Cache do Sistema (Profunda)", None, ActionKind.INTERACTIVE,
-                    "Limpa arquivos temporários, Prefetch, Lixeira e cache do Windows Update.",
-                    action_key="system_cleanup"),
-        CommandItem("Listar Programas de Inicialização Automática",
-                    "Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location,User | Format-Table -AutoSize",
-                    ActionKind.NORMAL, "Lista todos os aplicativos configurados para iniciar com o Windows."),
-        CommandItem("Listar drivers carregados no Kernel", "driverquery /fo TABLE", ActionKind.NORMAL,
-                    "Exibe todos os módulos .sys em execução no ring 0."),
-        CommandItem("Drivers de Terceiros instalados (Dism /Get-Drivers)", "dism /online /get-drivers /format:table", ActionKind.NORMAL,
-                    "Lista exclusivamente drivers OEM (não nativos da Microsoft) instalados no sistema."),
-        CommandItem("Dispositivos com Falha no Gerenciador de Dispositivos", "Get-PnpDevice | Where-Object Status -ne 'OK' | Format-Table -AutoSize", ActionKind.NORMAL,
-                    "Localiza hardwares com problemas de inicialização ou sem driver correspondente."),
-        CommandItem("Configuração de Dumps de Memória (BSOD CrashDump)",
-                    "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl' | Format-List",
-                    ActionKind.NORMAL, "Exibe o tipo de dump gerado em caso de tela azul (Small, Kernel ou Complete Dump)."),
-        CommandItem("Iniciar / Parar / Consultar Serviços", None, ActionKind.INTERACTIVE,
-                    "Permite alterar o ciclo de vida de qualquer serviço registrado no SCM.",
-                    action_key="manage_service"),
-    ]),
-
-    Category("8. Subsistemas, DevTools e Virtualização", [
-        CommandItem("Status das Distribuições WSL", "wsl --list --verbose", ActionKind.NORMAL,
-                    "Lista as distribuições Linux instaladas, versão do subsistema (WSL 1 vs WSL 2) e estado."),
-        CommandItem("Encerrar todas as instâncias WSL (Shutdown)", "wsl --shutdown", ActionKind.NORMAL,
-                    "Termina a máquina virtual leve do WSL2 liberando toda a memória RAM alocada."),
-        CommandItem("Verificar Recursos de Virtualização Hyper-V", "Get-WindowsOptionalFeature -Online | Where-Object FeatureName -like '*Hyper-V*'", ActionKind.NORMAL,
-                    "Verifica se os módulos do hypervisor tipo-1 nativo estão habilitados."),
-        CommandItem("Atualizar todos os pacotes instalados via WinGet", "winget upgrade --all --include-unknown", ActionKind.DANGEROUS,
-                    "Verifica e atualiza todos os programas e bibliotecas gerenciados pelo Windows Package Manager."),
-        CommandItem("Habilitar WinRM (PowerShell Remoting)", "Enable-PSRemoting -Force", ActionKind.DANGEROUS,
-                    "Configura a máquina para receber comandos remotos via WS-Management."),
-    ]),
-
-    Category("9. Utilitários e Scripts Remotos da Comunidade", [
-        CommandItem("Microsoft Activation Scripts (MAS)", "irm https://get.activated.win | iex", ActionKind.DANGEROUS,
-                    "Interface comunitária open-source para gerenciamento e ativação de licenças HWID/KMS38."),
-        CommandItem("Chris Titus Tech WinUtil", "irm https://christitus.com/win | iex", ActionKind.DANGEROUS,
-                    "Ferramenta para tweaks do sistema, debloat, desativação de telemetria e instalação em massa."),
-        CommandItem("Win-Debloat (raphi.re)", "& ([scriptblock]::Create((irm 'https://debloat.raphi.re/')))", ActionKind.DANGEROUS,
-                    "Automação focada na remoção de bloatware, otimização de privacidade e corte de serviços nativos."),
-    ]),
-
-    Category("10. Kits de Diagnóstico Integrado & Exportação", [
-        CommandItem("Kit Completo: Diagnóstico de Rede & DNS", "KIT_REDE_PRO", ActionKind.KIT,
-                    "Executa coleta de IPs, testes ICMP, resolução DNS, rotas, conexões ativas e estatísticas."),
-        CommandItem("Kit Completo: Auditoria Forense e Segurança", "KIT_SECURITY", ActionKind.KIT,
-                    "Gera relatório de privilégios (whoami /all), auditoria de portas, VBS, drivers e firewall."),
-        CommandItem("Kit Completo: Triage de Saúde de Hardware e Disco", "KIT_HARDWARE", ActionKind.KIT,
-                    "Coleta integridade SMART, partições, topologia de CPU, uso de RAM e erros críticos nos logs."),
-    ]),
-]
-
-
-# ---------------------------------------------------------------------------
-# Manual Técnico & Documentação
-# ---------------------------------------------------------------------------
-
-def show_documentation() -> None:
-    while True:
-        os.system("cls" if os.name == "nt" else "clear")
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-        print(f"{Color.CYAN} MANUAL TÉCNICO & DOCUMENTAÇÃO DE COMANDOS{Color.RESET}")
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-        print(" Selecione a categoria para consultar detalhes arquiteturais:\n")
-        for i, cat in enumerate(CATEGORIES_DATA, start=1):
-            print(f" {Color.BOLD}{i:2d}){Color.RESET} {cat.name}")
-        print(f"  {Color.YELLOW}A){Color.RESET} Ver documentação completa de TODAS as opções")
-        print(f"  {Color.GREEN}0){Color.RESET} Retornar ao menu principal")
-        print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-
-        try:
-            choice = input(f"\n{Color.CYAN}Opção: {Color.RESET}").strip().lower()
-        except KeyboardInterrupt:
-            break
-
-        if choice in ("0", ""):
-            break
-        elif choice == "a":
-            os.system("cls" if os.name == "nt" else "clear")
-            for cat in CATEGORIES_DATA:
-                print(f"\n{Color.BOLD}{'=' * 75}\n {cat.name.upper()}\n{'=' * 75}{Color.RESET}")
-                for item in cat.items:
-                    cmd_str = item.command if item.command else f"[Rotina Especial: {item.action_key}]"
-                    tag = f" {Color.RED}[Ação de Impacto]{Color.RESET}" if item.kind == ActionKind.DANGEROUS else ""
-                    print(f"\n {Color.BOLD}• {item.title}{Color.RESET}{tag}")
-                    print(f"   {Color.DIM}Comando : {cmd_str}{Color.RESET}")
-                    print(f"   Detalhes: {item.description}")
-            input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-        elif choice.isdigit() and 1 <= int(choice) <= len(CATEGORIES_DATA):
-            selected_cat = CATEGORIES_DATA[int(choice) - 1]
-            os.system("cls" if os.name == "nt" else "clear")
-            print(f"\n{Color.BOLD}{'=' * 75}\n {selected_cat.name.upper()}\n{'=' * 75}{Color.RESET}")
-            for item in selected_cat.items:
-                cmd_str = item.command if item.command else f"[Rotina Especial: {item.action_key}]"
-                tag = f" {Color.RED}[Ação de Impacto]{Color.RESET}" if item.kind == ActionKind.DANGEROUS else ""
-                print(f"\n {Color.BOLD}• {item.title}{Color.RESET}{tag}")
-                print(f"   {Color.DIM}Comando : {cmd_str}{Color.RESET}")
-                print(f"   Detalhes: {item.description}")
-            input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-
-
-# ---------------------------------------------------------------------------
-# Loop Principal e Interface
-# ---------------------------------------------------------------------------
-
-def print_header() -> None:
-    os.system("cls" if os.name == "nt" else "clear")
-    dry_tag = f" {Color.YELLOW}[MODO DRY-RUN / DEMO]{Color.RESET}" if DRY_RUN else ""
-    print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-    print(f"{Color.GREEN} WINDOWS ADMIN & POWER-USER TOOLKIT v{VERSION}{Color.RESET}{dry_tag}")
-    print(f" {Color.DIM}Ambiente: {sys.platform.upper()} | Python 3.14.4 | Autor: github.com/Vitoriodev{Color.RESET}")
-    print(f"{Color.BOLD}{'=' * 75}{Color.RESET}")
-    print(f" Log de auditoria : {Color.CYAN}{LOG_FILE}{Color.RESET}")
-    print(f" Comandos globais : {Color.BOLD}[h]{Color.RESET} Ajuda/Doc | {Color.BOLD}[l]{Color.RESET} Logs | {Color.BOLD}[c]{Color.RESET} CLI Livre | {Color.BOLD}[p]{Color.RESET} PowerShell | {Color.BOLD}[q]{Color.RESET} Sair")
-    print(f"{Color.BOLD}{'=' * 75}{Color.RESET}\n")
-
-
-def show_categories() -> None:
-    for i, cat in enumerate(CATEGORIES_DATA, start=1):
-        print(f" {Color.BOLD}{i:2d}){Color.RESET} {cat.name}")
-
-
-def show_commands(cat: Category) -> None:
-    print(f"\n{Color.BOLD}{Color.CYAN}--- {cat.name} ---{Color.RESET}")
-    for i, item in enumerate(cat.items, start=1):
-        tag = ""
-        if item.kind == ActionKind.DANGEROUS:
-            tag = f"  {Color.RED}[!] Impacto/Altera Sistema{Color.RESET}"
-        elif item.kind == ActionKind.INTERACTIVE:
-            tag = f"  {Color.YELLOW}[interativo]{Color.RESET}"
-        elif item.kind == ActionKind.KIT:
-            tag = f"  {Color.MAGENTA}[Kit Composto]{Color.RESET}"
-        print(f" {Color.BOLD}{i:2d}){Color.RESET} {item.title}{tag}")
-    print(f"  {Color.GREEN}0){Color.RESET} Voltar")
-
-
-def free_command() -> None:
-    try:
-        cmd = input(f"\n{Color.GREEN}PowerShell> {Color.RESET}").strip()
-        if not cmd or cmd.lower() in ("exit", "quit"):
+    def custom_format_volume(self):
+        drive = simpledialog.askstring("Formatar Volume", "Informe a letra da unidade SECUNDÁRIA (ex: D, E, F):")
+        if not drive or len(drive.strip()) != 1:
             return
-        run_powershell(cmd)
-    except KeyboardInterrupt:
-        print()
-
-
-def interactive_powershell() -> None:
-    print(f"\n{Color.YELLOW}Abrindo console PowerShell interativo (digite 'exit' para retornar ao toolkit)...{Color.RESET}\n")
-    if DRY_RUN:
-        print("[DRY-RUN] Terminal interativo PowerShell simulado.")
-    else:
-        try:
-            subprocess.run(["powershell", "-NoExit", "-NoProfile"])
-        except Exception as e:
-            print(f"{Color.RED}Erro ao iniciar PowerShell: {e}{Color.RESET}")
-
-
-def category_loop(cat: Category) -> None:
-    while True:
-        show_commands(cat)
-        try:
-            choice = input(f"\n{Color.CYAN}Escolha um comando: {Color.RESET}").strip()
-        except KeyboardInterrupt:
-            print()
+        clean = drive.strip().upper()
+        sys_drive = os.environ.get("SystemDrive", "C:").replace(":", "").upper()
+        if clean == sys_drive:
+            messagebox.showerror("Bloqueio de Segurança", f"Não é permitido formatar a partição do sistema ({clean}:) por este método.")
             return
 
-        if choice in ("0", ""):
+        fs = simpledialog.askstring("Sistema de Arquivos", "Digite NTFS, FAT32 ou exFAT:", initialvalue="NTFS")
+        if not fs or fs.upper() not in ("NTFS", "FAT32", "EXFAT"):
             return
-        if not choice.isdigit() or not (1 <= int(choice) <= len(cat.items)):
-            print(f"{Color.RED}Opção inválida.{Color.RESET}")
-            continue
 
-        item = cat.items[int(choice) - 1]
+        if messagebox.askyesno("ATENÇÃO CRÍTICA", f"TODOS OS DADOS DA UNIDADE {clean}: SERÃO APAGADOS.\n\nFormatar em {fs.upper()} agora?"):
+            cmd = f'Format-Volume -DriveLetter {clean} -FileSystem {fs.upper()} -Force'
+            self.run_powershell_async(cmd, f"Formatando Volume {clean}: ({fs.upper()})")
 
-        # Execução de Ações Especiais
-        if item.kind == ActionKind.INTERACTIVE and item.action_key:
-            if item.action_key in SPECIAL_ACTIONS:
-                try:
-                    SPECIAL_ACTIONS[item.action_key]()
-                except KeyboardInterrupt:
-                    print(f"\n{Color.YELLOW}[!] Ação cancelada.{Color.RESET}")
-                input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-            continue
+    def custom_kill_process(self):
+        pid = simpledialog.askstring("Finalizar Processo", "Informe o PID do processo a encerrar:")
+        if pid and pid.isdigit():
+            self.run_powershell_async(f"Stop-Process -Id {pid} -Force", f"Kill PID {pid}")
 
-        # Execução de Kits Compostos
-        if item.kind == ActionKind.KIT and item.command in KITS_RAW:
-            print(f"\n{Color.BOLD}Kit selecionado: {item.title}{Color.RESET}")
-            print(" 1) Executar e exibir na tela")
-            print(" 2) Executar e Exportar Relatório completo (Markdown)")
-            print(" 0) Cancelar")
-            kit_opt = input(f"\n{Color.CYAN}Opção: {Color.RESET}").strip()
-            if kit_opt == "1":
-                for line in KITS_RAW[item.command].strip().splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    print(f"\n{Color.CYAN}$ {line}{Color.RESET}")
-                    run_powershell(line)
-                input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-            elif kit_opt == "2":
-                export_diagnostic_kit(item.command, item.title, KITS_RAW[item.command])
-                input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-            continue
+    def custom_unlock_file(self):
+        path = simpledialog.askstring("Desbloquear Arquivo", "Caminho do arquivo ou pasta presa:")
+        if path:
+            escaped = path.replace("'", "''")
+            cmd = f"Get-Process | Where-Object {{ $_.Path -like '*{escaped}*' }} | Select-Object Id,ProcessName,Path | Format-Table -AutoSize"
+            self.run_powershell_async(cmd, f"Inspecionar arquivo travado: {path}")
 
-        # Confirmação para comandos perigosos
-        if item.kind == ActionKind.DANGEROUS:
-            if not confirm(f"ATENÇÃO: '{item.title}' causará alterações persistentes no sistema. Deseja continuar?"):
-                print(f"{Color.YELLOW}Operação abortada pelo usuário.{Color.RESET}")
-                continue
+    def custom_test_port(self):
+        host = simpledialog.askstring("Testar Porta TCP", "Informe o Host ou IP (ex: 8.8.8.8, google.com):")
+        if not host:
+            return
+        port = simpledialog.askstring("Testar Porta TCP", "Informe a Porta TCP (ex: 80, 443, 22):")
+        if port and port.isdigit():
+            escaped = host.replace("'", "''")
+            cmd = f"Test-NetConnection -ComputerName '{escaped}' -Port {port} -InformationLevel Detailed"
+            self.run_powershell_async(cmd, f"Testando conexão com {host}:{port}")
 
-        if item.command:
-            print(f"\n{Color.CYAN}$ {item.command}{Color.RESET}\n")
-            run_powershell(item.command)
-            input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
+    def custom_calc_hash(self):
+        path = filedialog.askopenfilename(title="Selecione um arquivo para calcular o Hash SHA-256")
+        if path:
+            escaped = path.replace("'", "''")
+            cmd = f"Get-FileHash -Path '{escaped}' -Algorithm SHA256 | Format-List"
+            self.run_powershell_async(cmd, f"Calculando SHA-256 de {os.path.basename(path)}")
 
+    def custom_show_wifi(self):
+        cmd = """
+        $profiles = netsh wlan show profiles | Select-String "All User Profile\\s*:\\s*(.*)$" | ForEach-Object { $_.Matches.Groups[1].Value.Trim() }
+        foreach ($p in $profiles) {
+            $pass = (netsh wlan show profile name="$p" key=clear | Select-String "Key Content\\s*:\\s*(.*)$")
+            $key = if ($pass) { $pass.Matches.Groups[1].Value.Trim() } else { "[Aberta]" }
+            [PSCustomObject]@{ 'SSID / Rede' = $p; 'Senha' = $key }
+        } | Format-Table -AutoSize
+        """
+        self.run_powershell_async(cmd, "Senhas Wi-Fi Salvas")
 
-def main() -> None:
-    global DRY_RUN
-
-    Color.enable_vt_support()
-
-    parser = argparse.ArgumentParser(description=f"Windows Admin & Power-User Toolkit v{VERSION}")
-    parser.add_argument("--dry-run", "--demo", "-d", action="store_true", help="Executa em modo de simulação sem alterar o sistema.")
-    args = parser.parse_args()
-
-    if args.dry_run:
-        DRY_RUN = True
-
-    ensure_admin()
-
-    while True:
-        print_header()
-        show_categories()
-        try:
-            choice = input(f"\n{Color.CYAN}Selecione uma categoria: {Color.RESET}").strip().lower()
-        except KeyboardInterrupt:
-            print(f"\n{Color.YELLOW}Saindo.{Color.RESET}")
-            break
-
-        if choice in ("q", "quit", "exit"):
-            print(f"{Color.GREEN}Sessão encerrada com sucesso.{Color.RESET}")
-            break
-        elif choice in ("h", "help", "doc", "ajuda"):
-            show_documentation()
-        elif choice in ("l", "log", "logs"):
-            action_view_logs()
-        elif choice == "c":
-            free_command()
-            input(f"\n{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-        elif choice == "p":
-            interactive_powershell()
-        elif choice.isdigit() and 1 <= int(choice) <= len(CATEGORIES_DATA):
-            category_loop(CATEGORIES_DATA[int(choice) - 1])
+    def custom_safeboot(self):
+        res = messagebox.askquestion("Modo de Segurança", "Escolha a opção desejada:\n\n'Sim' = Modo Seguro com Rede\n'Não' = Restaurar Boot Normal")
+        if res == "yes":
+            self.run_powershell_async("bcdedit /set '{current}' safeboot network", "Ativar Safe Mode com Rede")
         else:
-            print(f"{Color.RED}Entrada não reconhecida.{Color.RESET}")
+            self.run_powershell_async("bcdedit /deletevalue '{current}' safeboot", "Restaurar Boot Normal")
+
+    def custom_factory_reset(self):
+        res = messagebox.askquestion(
+            "Restauração de Fábrica",
+            "Deseja abrir o Assistente Nativo do Windows (systemreset.exe)?\n\nEscolha 'Não' se preferir reiniciar no menu WinRE."
+        )
+        if res == "yes":
+            self.run_powershell_async("systemreset.exe", "Restauração de Fábrica (GUI)")
+        else:
+            if messagebox.askyesno("Reiniciar no WinRE", "O computador será reiniciado imediatamente no menu de recuperação. Confirmar?"):
+                self.run_powershell_async("shutdown /r /o /f /t 00", "Reiniciar no WinRE")
+
+    def custom_generate_html_report(self):
+        desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+        target_file = os.path.join(desktop_path, f"Laudo_Tecnico_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+
+        def worker():
+            self.write_console(f"\n[*] Gerando laudo técnico consolidado em HTML...\n")
+            cmd = """
+            $d = Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,HealthStatus | Out-String
+            $v = Get-Volume | Select-Object DriveLetter,FileSystemLabel,SizeRemaining,Size | Out-String
+            $c = Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors | Out-String
+            $m = Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,Capacity,Speed | Out-String
+            $n = Get-NetIPConfiguration | Out-String
+            [PSCustomObject]@{ Discos = $d; Volumes = $v; CPU = $c; RAM = $m; Rede = $n } | ConvertTo-Json
+            """
+            proc = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], capture_output=True, text=True, encoding="utf-8", errors="replace")
             try:
-                input(f"{Color.CYAN}Pressione Enter para continuar...{Color.RESET}")
-            except KeyboardInterrupt:
-                pass
+                import json
+                data = json.loads(proc.stdout)
+                html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Laudo Técnico</title>
+                <style>body{{font-family:Segoe UI,sans-serif;background:#0f172a;color:#f8fafc;padding:20px;}} .card{{background:#1e293b;padding:15px;border-radius:8px;margin-bottom:15px;}} pre{{background:#020617;padding:10px;border-radius:4px;color:#a5f3fc;overflow-x:auto;}}</style></head><body>
+                <h2>Relatório Consolidado de Diagnóstico - {os.environ.get('COMPUTERNAME', 'Localhost')}</h2>
+                <div class="card"><h3>Hardware & CPU</h3><pre>{data.get('CPU')}</pre></div>
+                <div class="card"><h3>Memória RAM</h3><pre>{data.get('RAM')}</pre></div>
+                <div class="card"><h3>Saúde de Armazenamento</h3><pre>{data.get('Discos')}</pre></div>
+                <div class="card"><h3>Partições</h3><pre>{data.get('Volumes')}</pre></div>
+                <div class="card"><h3>Configurações de Rede</h3><pre>{data.get('Rede')}</pre></div>
+                </body></html>"""
+                with open(target_file, "w", encoding="utf-8") as f:
+                    f.write(html)
+                self.write_console(f"\n[✓] Laudo salvo com sucesso na Área de Trabalho:\n{target_file}\n")
+            except Exception as e:
+                self.write_console(f"\n[!] Falha ao gerar HTML: {e}\n")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # -----------------------------------------------------------------------
+    # Catálogo
+    # -----------------------------------------------------------------------
+
+    def init_catalog(self):
+        self.categories = {
+            "1. Triagem & Chamados": [
+                CommandItem("Resumo Técnico para Chamados", None, ActionType.CUSTOM, "Gera sumário formatado de Host, Serial, CPU e Discos para tickets.", self.custom_ticket_summary),
+                CommandItem("Gerar Laudo Técnico Completo (HTML)", None, ActionType.CUSTOM, "Exporta relatório consolidado de Hardware, Discos e Rede para o Desktop.", self.custom_generate_html_report),
+                CommandItem("Informações Gerais (systeminfo)", "systeminfo", ActionType.NORMAL, "Relatório nativo com dados de BIOS, placa-mãe e patches."),
+                CommandItem("Versão Exata do Windows (winver)", "winver", ActionType.NORMAL, "Interface gráfica com build e kernel NT."),
+            ],
+            "2. Processador & CPU": [
+                CommandItem("Topologia de CPU e Frequências", "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed | Format-List", ActionType.NORMAL, "Exibe núcleos, threads e clock base."),
+                CommandItem("Monitorar Clock e Throttling", "Get-CimInstance Win32_Processor | Select-Object Name,CurrentClockSpeed,MaxClockSpeed | Format-List", ActionType.NORMAL, "Verifica se a CPU está operando com corte de frequência."),
+                CommandItem("Caches L2/L3 do Processador", "Get-CimInstance Win32_Processor | Select-Object Name,L2CacheSize,L3CacheSize | Format-List", ActionType.NORMAL, "Consulta memória cache do processador."),
+            ],
+            "3. Memória RAM": [
+                CommandItem("Pentes Instalados e Barramento (MHz)", "Get-CimInstance Win32_PhysicalMemory | Select-Object DeviceLocator,Capacity,Speed,Manufacturer,PartNumber | Format-Table -AutoSize", ActionType.NORMAL, "Módulos de memória instalados, frequências e slots ocupados."),
+                CommandItem("Agendar Teste de Memória (mdsched)", "mdsched.exe", ActionType.NORMAL, "Abre a rotina nativa para testar a RAM no próximo boot."),
+            ],
+            "4. Bateria & Energia": [
+                CommandItem("Relatório de Bateria (HTML no Desktop)", 'powercfg /batteryreport /output "$env:USERPROFILE\\Desktop\\bateria_relatorio.html"', ActionType.NORMAL, "Gera laudo oficial sobre capacidade e ciclos de carga."),
+                CommandItem("Desativar Hibernação / Fast Startup", "powercfg /hibernate off", ActionType.NORMAL, "Desliga a hibernação híbrida contra instabilidades de boot."),
+                CommandItem("Ativar Hibernação / Fast Startup", "powercfg /hibernate on", ActionType.NORMAL, "Habilita a hibernação e inicialização rápida."),
+            ],
+            "5. Armazenamento & SMART": [
+                CommandItem("Integridade SMART e Tipo de Mídia", "Get-PhysicalDisk | Select-Object DeviceId,FriendlyName,MediaType,HealthStatus | Format-Table -AutoSize", ActionType.NORMAL, "Exibe saúde física de SSDs, HDDs e NVMe."),
+                CommandItem("Horas de Uso e Desgaste (Reliability)", "Get-PhysicalDisk | Get-StorageReliabilityCounter | Select-Object DeviceId,ReadErrorsTotal,PowerOnHours,Temperature | Format-Table -AutoSize", ActionType.NORMAL, "Tempo total de operação (Power-On Hours) e temperatura."),
+                CommandItem("Partições e Espaço Disponível", "Get-Volume | Select-Object DriveLetter,FileSystemLabel,SizeRemaining,Size | Format-Table -AutoSize", ActionType.NORMAL, "Lista partições montadas e espaço livre."),
+                CommandItem("CHKDSK Dinâmico (Scan Leitura)", None, ActionType.CUSTOM, "Executa varredura de integridade na unidade informada.", self.custom_chkdsk_dynamic),
+                CommandItem("Otimização/TRIM em SSD", None, ActionType.CUSTOM, "Dispara comando TRIM na partição selecionada.", self.custom_trim_dynamic),
+            ],
+            "6. Formatação & Partições": [
+                CommandItem("Restauração / Formatação de Fábrica", None, ActionType.DANGEROUS, "Reinstalação do Windows sem pendrive ou reinício no WinRE.", self.custom_factory_reset),
+                CommandItem("Formatar Volume Secundário / Pendrive", None, ActionType.DANGEROUS, "Formata volumes D:, E: em NTFS, FAT32 ou exFAT com trava na C:.", self.custom_format_volume),
+                CommandItem("Abrir DiskPart (CLI)", "Start-Process diskpart.exe", ActionType.DANGEROUS, "Abre a ferramenta nativa de baixo nível para particionamento."),
+            ],
+            "7. Reparo de Arquivos (SFC/DISM)": [
+                CommandItem("Verificar Sistema (SFC /scannow)", "sfc /scannow", ActionType.NORMAL, "Verifica e repara binários protegidos corrompidos."),
+                CommandItem("DISM CheckHealth", "DISM /Online /Cleanup-Image /CheckHealth", ActionType.NORMAL, "Consulta flags de corrupção identificadas pelo kernel."),
+                CommandItem("DISM ScanHealth", "DISM /Online /Cleanup-Image /ScanHealth", ActionType.NORMAL, "Varredura profunda no repositório WinSxS."),
+                CommandItem("DISM RestoreHealth", "DISM /Online /Cleanup-Image /RestoreHealth", ActionType.NORMAL, "Restaura pacotes corrompidos via Windows Update."),
+                CommandItem("Limpeza do WinSxS (ResetBase)", "DISM /Online /Cleanup-Image /StartComponentCleanup /ResetBase", ActionType.DANGEROUS, "Remove versões antigas de atualizações para liberar espaço."),
+            ],
+            "8. Rede Cabeada & TCP/IP": [
+                CommandItem("Configuração de Interfaces e IPs", "Get-NetIPConfiguration -Detailed", ActionType.NORMAL, "Lista endereços IPv4/IPv6, gateways e servidores DNS."),
+                CommandItem("Reiniciar Adaptadores Físicos de Rede", "Get-NetAdapter -Physical | ForEach-Object { Disable-NetAdapter -Name $_.Name -Confirm:$false; Start-Sleep 2; Enable-NetAdapter -Name $_.Name -Confirm:$false }", ActionType.NORMAL, "Desativa e reativa placas Ethernet e Wi-Fi no driver."),
+                CommandItem("Testar Porta TCP (Conectividade)", None, ActionType.CUSTOM, "Executa handshake TCP contra host e porta específicos.", self.custom_test_port),
+                CommandItem("Limpar Cache DNS", "Clear-DnsClientCache", ActionType.NORMAL, "Descarta registros resolvidos em cache."),
+                CommandItem("Tabela de Sockets e Portas em Escuta", "netstat -ano -p tcp", ActionType.NORMAL, "Lista conexões TCP ativas e portas em LISTENING."),
+                CommandItem("Reset Completo de Rede (Winsock + IP)", "netsh winsock reset; netsh int ip reset", ActionType.DANGEROUS, "Restaura catálogo Winsock e pilha TCP/IP aos padrões de fábrica."),
+            ],
+            "9. Rede Sem Fio (Wi-Fi)": [
+                CommandItem("Recuperar Senhas Wi-Fi Salvas", None, ActionType.CUSTOM, "Lista redes sem fio salvas e exibe a senha em texto limpo.", self.custom_show_wifi),
+                CommandItem("Status da Interface Wi-Fi", "netsh wlan show interfaces", ActionType.NORMAL, "Exibe sinal, canal, BSSID e taxa de transmissão da conexão atual."),
+                CommandItem("Relatório Completo WLAN (HTML)", 'netsh wlan show wlanreport', ActionType.NORMAL, "Gera diagnóstico histórico detalhado da conexão sem fio."),
+            ],
+            "10. Limpeza & Otimização": [
+                CommandItem("Limpar Pastas Temporárias (%TEMP%)", 'Remove-Item "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item "$env:SystemRoot\\Temp\\*" -Recurse -Force -ErrorAction SilentlyContinue', ActionType.NORMAL, "Esvazia pastas temporárias do usuário e do sistema."),
+                CommandItem("Esvaziar Lixeira do Windows", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue", ActionType.NORMAL, "Remove todos os arquivos da Lixeira sem confirmação."),
+                CommandItem("Limpar Cache do Windows Update", "net stop wuauserv; Remove-Item -Path \"$env:SystemRoot\\SoftwareDistribution\\Download\\*\" -Recurse -Force -ErrorAction SilentlyContinue; net start wuauserv", ActionType.NORMAL, "Apaga downloads de atualizações antigas acumuladas."),
+                CommandItem("Reparar Cache de Ícones & Explorer", "Stop-Process -Name explorer -Force; Remove-Item -Path \"$env:LOCALAPPDATA\\IconCache.db\" -Force -ErrorAction SilentlyContinue; Start-Process explorer.exe", ActionType.NORMAL, "Corrige ícones em branco e reinicia o explorer."),
+            ],
+            "11. Processos & Desbloqueio": [
+                CommandItem("Desbloquear Arquivo / Pasta Travada", None, ActionType.CUSTOM, "Localiza processos com handles abertos em um arquivo.", self.custom_unlock_file),
+                CommandItem("Top Processos por Consumo de CPU", "Get-Process | Sort-Object CPU -Descending | Select-Object -First 15 Id,ProcessName,CPU | Format-Table -AutoSize", ActionType.NORMAL, "Lista os 15 processos que mais consomem processamento."),
+                CommandItem("Mapeamento Processo -> Serviços", "tasklist /svc", ActionType.NORMAL, "Identifica serviços rodando dentro de cada svchost.exe."),
+                CommandItem("Finalizar Processo por PID", None, ActionType.CUSTOM, "Envia sinal de término imediato para o PID informado.", self.custom_kill_process),
+            ],
+            "12. Serviços & Spooler": [
+                CommandItem("Destravar Fila de Impressão (Spooler)", 'net stop spooler; Remove-Item "$env:SystemRoot\\System32\\spool\\PRINTERS\\*" -Force -Recurse -ErrorAction SilentlyContinue; net start spooler', ActionType.NORMAL, "Para o spooler, esvazia o buffer travado e reinicia o serviço."),
+                CommandItem("Reset Profundo do Windows Update", 'net stop wuauserv; net stop cryptSvc; net stop bits; Remove-Item "$env:SystemRoot\\SoftwareDistribution" -Recurse -Force -ErrorAction SilentlyContinue; net start bits; net start cryptSvc; net start wuauserv', ActionType.NORMAL, "Para serviços e reconstrói catálogos de atualização."),
+                CommandItem("Consultar Serviços em Execução", "Get-Service | Where-Object Status -eq 'Running' | Format-Table -AutoSize", ActionType.NORMAL, "Lista todos os serviços ativos no SCM."),
+            ],
+            "13. Drivers & Dispositivos": [
+                CommandItem("Dispositivos com Falha (Device Manager)", "Get-PnpDevice | Where-Object Status -ne 'OK' | Format-Table -AutoSize", ActionType.NORMAL, "Localiza hardwares com erro ou sem driver instalado."),
+                CommandItem("Backup de Drivers OEM de Terceiros", 'if (!(Test-Path "C:\\DriverBackup")) { New-Item -ItemType Directory -Path "C:\\DriverBackup" -Force }; Export-WindowsDriver -Online -Destination "C:\\DriverBackup"', ActionType.NORMAL, "Exporta drivers instalados para C:\\DriverBackup."),
+                CommandItem("Listar Drivers Carregados no Kernel", "driverquery /fo TABLE", ActionType.NORMAL, "Exibe todos os módulos .sys ativos no sistema."),
+            ],
+            "14. Segurança & Licenciamento": [
+                CommandItem("Chave de Ativação Original (BIOS OEM)", "(Get-CimInstance SoftwareLicensingService).OA3xOriginalProductKey", ActionType.NORMAL, "Recupera a chave de ativação gravada na placa-mãe."),
+                CommandItem("Calcular Hash SHA-256 de Arquivo", None, ActionType.CUSTOM, "Calcula o checksum SHA-256 selecionando um arquivo via diálogo.", self.custom_calc_hash),
+                CommandItem("Status do BitLocker e TPM", "manage-bde -status; Get-Tpm", ActionType.NORMAL, "Verifica criptografia de volume e segurança do chip TPM 2.0."),
+                CommandItem("Criar Ponto de Restauração", 'Checkpoint-Computer -Description "WinToolkit Backup" -RestorePointType "MODIFY_SETTINGS"', ActionType.NORMAL, "Gera ponto de restauração prévio no Windows."),
+                CommandItem("Varredura Rápida Defender (CLI)", "Start-MpScan -ScanType QuickScan", ActionType.NORMAL, "Dispara verificação rápida do antivírus nativo."),
+                CommandItem("Atualizar Assinaturas do Defender", "Update-MpSignature", ActionType.NORMAL, "Força download das definições de malwares mais recentes."),
+            ],
+            "15. Inicialização & Boot": [
+                CommandItem("Configurar Modo de Segurança (BCD)", None, ActionType.CUSTOM, "Alterna boot para Modo Seguro com Rede ou restaura normal.", self.custom_safeboot),
+                CommandItem("Listar Programas na Inicialização", "Get-CimInstance Win32_StartupCommand | Select-Object Name,Command,Location,User | Format-Table -AutoSize", ActionType.NORMAL, "Inspeciona itens que iniciam com o Windows."),
+                CommandItem("Configuração de Dumps (CrashDump BSOD)", "Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CrashControl' | Format-List", ActionType.NORMAL, "Exibe tipo de dump gerado em caso de tela azul."),
+            ],
+            "16. Instalação & Pós-Formatação": [
+                CommandItem("Instalar Softwares Essenciais (WinGet)", "winget install --id Google.Chrome -e --silent; winget install --id 7zip.7zip -e --silent; winget install --id Adobe.Acrobat.Reader.64-bit -e --silent; winget install --id VideoLAN.VLC -e --silent", ActionType.NORMAL, "Instalação silenciosa de Chrome, 7-Zip, PDF e VLC."),
+                CommandItem("Atualizar Todos os Programas (WinGet)", "winget upgrade --all --include-unknown", ActionType.NORMAL, "Atualiza todos os aplicativos gerenciados pelo WinGet."),
+                CommandItem("Status de Instâncias WSL", "wsl --list --verbose", ActionType.NORMAL, "Lista distribuições Linux e estado do WSL."),
+            ],
+            "17. Tweaks Comunitários & Debloat": [
+                CommandItem(
+                    "Chris Titus Tech WinUtil",
+                    "Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://christitus.com/win | iex'",
+                    ActionType.DANGEROUS,
+                    "Abre o painel gráfico comunitário para debloat, telemetria e instalação em massa."
+                ),
+                CommandItem(
+                    "Win-Debloat (raphi.re)",
+                    "Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', '& ([scriptblock]::Create((irm https://debloat.raphi.re/)))'",
+                    ActionType.DANGEROUS,
+                    "Automação focada em remoção de bloatwares do Windows e otimização de privacidade."
+                ),
+                CommandItem(
+                    "Microsoft Activation Scripts (MAS)",
+                    "Start-Process powershell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', 'irm https://get.activated.win | iex'",
+                    ActionType.DANGEROUS,
+                    "Interface interativa de terminal para gerenciamento de licenças HWID/KMS38."
+                ),
+            ],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Bloco de Proteção e Execução Principal
+# ---------------------------------------------------------------------------
+
+def main():
+    if not is_admin():
+        # Tenta elevar; se o usuário recusar o prompt UAC, continua em modo usuário comum
+        relaunch_as_admin()
+
+    app = ToolkitGUI()
+    app.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        err_msg = traceback.format_exc()
+        if os.name == "nt":
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"Ocorreu um erro durante a execução do Toolkit:\n\n{err_msg}",
+                "Toolkit - Erro Não Tratado",
+                0x10  # MB_ICONERROR
+            )
+        else:
+            print(err_msg, file=sys.stderr)
+        sys.exit(1)
