@@ -36,19 +36,7 @@ Recursos gerais do programa:
 - Python 3.10+ (se executado via código-fonte)
 - Privilégios de administrador (solicitados automaticamente via UAC, exceto em modo `--dry-run`)
 
-## Uso
-
-```bash
-python win_toolkit.py
-```
-
-Modo de simulação, sem alterar nada no sistema e sem pedir elevação:
-
-```bash
-python win_toolkit.py --dry-run
-```
-
-Navegação no menu:
+## Navegação no menu:
 
 - Número da categoria → abre a lista de comandos daquela categoria
 - Número do comando → executa (pede confirmação se for uma ação de impacto)
@@ -57,15 +45,6 @@ Navegação no menu:
 - `c` — modo CLI livre (comando PowerShell arbitrário)
 - `p` — abrir terminal PowerShell interativo
 - `q` — sair
-
-## Estrutura do projeto
-
-```
-win_toolkit/
-├── win_toolkit.py   # script principal
-└── ico/
-    └── app.ico      # ícone do aplicativo
-```
 
 ## Aviso
 
