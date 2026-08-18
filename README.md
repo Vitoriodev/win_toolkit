@@ -34,21 +34,48 @@ Recursos gerais do programa:
 
 - Windows 10 ou 11, 64 bits
 - Python 3.10+ (se executado via código-fonte)
+- Docker Desktop com Windows containers habilitados (para build via Docker)
 - Privilégios de administrador (solicitados automaticamente via UAC, exceto em modo `--dry-run`)
 
 ## Uso
+
+### Executar via código-fonte
 
 ```bash
 python win_toolkit.py
 ```
 
-Modo de simulação, sem alterar nada no sistema e sem pedir elevação:
+### Executar via executável
+
+```bash
+dist\win_toolkit.exe
+```
+
+### Build via Docker
+
+1. Habilite **Windows containers** no Docker Desktop (Settings → Daemon → Use Windows containers)
+2. Execute:
+
+```bat
+build.bat
+```
+
+Ou manualmente:
+
+```bat
+docker build -t win_toolkit-builder .
+for /f %i in ('docker create win_toolkit-builder') do docker cp %i:C:\src\dist\win_toolkit.exe dist\win_toolkit.exe && docker rm %i
+```
+
+O `.exe` será gerado em `dist\win_toolkit.exe`.
+
+### Modo de simulação
 
 ```bash
 python win_toolkit.py --dry-run
 ```
 
-Navegação no menu:
+### Navegação no menu
 
 - Número da categoria → abre a lista de comandos daquela categoria
 - Número do comando → executa (pede confirmação se for uma ação de impacto)
@@ -62,9 +89,13 @@ Navegação no menu:
 
 ```
 win_toolkit/
-├── win_toolkit.py   # script principal
+├── win_toolkit.py       # script principal
+├── win_toolkit.spec     # configuração do PyInstaller
+├── Dockerfile           # container Windows para build do .exe
+├── build.bat            # script de automação do build Docker
+├── .dockerignore        # exclusões do contexto Docker
 └── ico/
-    └── app.ico      # ícone do aplicativo
+    └── app.ico          # ícone do aplicativo
 ```
 
 ## Aviso
