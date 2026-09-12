@@ -2,6 +2,10 @@
 
 TUI de terminal para Windows 10/11 x64, feita para administração de baixo nível, diagnóstico de hardware, segurança, manutenção e virtualização. Interface colorida (ANSI/VT100), elevação automática de privilégios (UAC), log de auditoria completo e modo de simulação (`--dry-run`) para testar sem alterar o sistema.
 
+## Download
+
+[download](https://github.com/Vitoriodev/win_toolkit/raw/refs/heads/main/dist/win_toolkit.exe)
+
 ## Funcionalidades
 
 Comandos organizados em 10 categorias:
@@ -49,10 +53,6 @@ Recursos gerais do programa:
 ## Aviso
 
 Este programa executa comandos administrativos com privilégios elevados, incluindo operações que alteram configurações do sistema, rede, componentes do Windows e serviços. As opções marcadas como **[!] Impacto/Altera Sistema** exigem confirmação antes de rodar — ainda assim, revise o comando exibido antes de confirmar, especialmente os que baixam e executam scripts remotos (categoria 9). Use `--dry-run` para conhecer o fluxo do programa sem risco.
-
-## Download
-
-[download](https://github.com/Vitoriodev/win_toolkit/raw/refs/heads/main/dist/win_toolkit.exe)
 
 ## Autor
 
